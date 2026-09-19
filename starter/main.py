@@ -32,6 +32,7 @@ from strands.hooks import (
     HookProvider, AfterInvocationEvent, HookRegistry, MessageAddedEvent,
 )
 import logging
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import uuid
 from typing import Dict
 from bedrock_agentcore.tools.code_interpreter_client import code_session
@@ -237,22 +238,7 @@ def search_knowledge_base(query: str) -> str:
     return "\n---\n".join(chunks) if chunks else "No relevant knowledge base information found."
 
 
-# ── TODO 7 — Loyalty Discount Tool (Code Interpreter) ────────────────────────
-# Implement calculate_loyalty_discount() using the @tool decorator.
-#
-# The tool must:
-#   1. Build a self-contained Python code string that:
-#        • Defines earn_rates: {"standard": 1, "device": 2, "fresh": 5}
-#        • Defines tier_rates: {"Silver": 0.00, "Gold": 0.10, "Platinum": 0.15}
-#        • Calculates points_redeemed (floor to nearest 500, cap at 50% of order)
-#        • Calculates tier_discount (applied to subtotal after points)
-#        • Calculates final_total, total_savings, points_earned, remaining_points
-#        • Prints a JSON result dict
-#   2. Execute the code with code_session(REGION).invoke("executeCode", {...})
-#      using language="python" and clearContext=True
-#   3. Return the first result event as a JSON string
-#   4. Include a fallback that computes only the tier discount if the
-#      Code Interpreter is unavailable
+# ── 7 — Loyalty Discount Tool (Code Interpreter) ───────────────────────────────
 
 @tool
 def calculate_loyalty_discount(
@@ -274,16 +260,86 @@ def calculate_loyalty_discount(
     Returns:
         Full discount breakdown and final price
     """
-    # TODO: Build the code string (use an f-string to inject the arguments)
-    code = ""  # Replace with your code string
-
+    if isinstance(loyalty_points, bool) or not isinstance(loyalty_points, int) or loyalty_points < 0:
+        return json.dumps({"error": "loyalty_points must be a non-negative integer."})
+    tier_rates = {"Silver": "0.00", "Gold": "0.10", "Platinum": "0.15"}
+    if tier not in tier_rates or product_category not in {"standard", "device", "fresh"}:
+        return json.dumps({"error": "Use a supported tier and product category."})
     try:
-        # TODO: Execute the code using code_session and return the result
-        pass
+        total = Decimal(str(order_total))
+        if isinstance(order_total, bool) or not total.is_finite() or total < 0:
+            raise ValueError("Invalid order total")
+        total = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return json.dumps({"error": "order_total must be a finite, non-negative USD amount."})
 
-    except Exception as e:
-        # TODO: Implement fallback calculation using tier discount only
-        pass
+    code = f"""
+import json
+from decimal import Decimal, ROUND_HALF_UP
+
+points = {loyalty_points!r}
+total = Decimal({str(total)!r})
+tier = {tier!r}
+category = {product_category!r}
+earn_rates = {{"standard": 1, "device": 2, "fresh": 5}}
+tier_rates = {{"Silver": Decimal("0.00"), "Gold": Decimal("0.10"), "Platinum": Decimal("0.15")}}
+cent = Decimal("0.01")
+# 100 points = $1; each 500-point block discounts $5.
+points_redeemed = min(points // 500, int(total / 2 / 5)) * 500
+points_discount = Decimal(points_redeemed) / 100
+subtotal = total - points_discount
+tier_discount = (subtotal * tier_rates[tier]).quantize(cent, rounding=ROUND_HALF_UP)
+final_total = subtotal - tier_discount
+# Earn whole points on the amount paid after all discounts.
+points_earned = int(final_total * earn_rates[category])
+print(json.dumps({{
+    "points_redeemed": points_redeemed,
+    "points_discount": float(points_discount),
+    "tier_discount_pct": int(tier_rates[tier] * 100),
+    "tier_discount": float(tier_discount),
+    "final_total": float(final_total),
+    "total_savings": float(total - final_total),
+    "points_earned": points_earned,
+    "remaining_points": points - points_redeemed + points_earned,
+    "calculation_mode": "code_interpreter",
+}}))
+"""
+    try:
+        with code_session(REGION) as interpreter:
+            response = interpreter.invoke("executeCode", {
+                "code": code, "language": "python", "clearContext": True,
+            })
+            for event in response["stream"]:
+                result = event.get("result")
+                if result is None or result.get("isError"):
+                    raise ValueError("Code interpreter execution failed")
+                structured = result.get("structuredContent", {})
+                if structured.get("exitCode", 0) != 0:
+                    raise ValueError("Code interpreter returned a nonzero exit code")
+                output = structured.get("stdout") or "\n".join(
+                    item["text"] for item in result.get("content", []) if item.get("type") == "text"
+                )
+                breakdown = json.loads(output)
+                required = {"points_redeemed", "tier_discount_pct", "final_total", "remaining_points"}
+                if not isinstance(breakdown, dict) or not required.issubset(breakdown):
+                    raise ValueError("Code interpreter returned an incomplete calculation")
+                return json.dumps(breakdown, allow_nan=False)
+            raise ValueError("Code interpreter returned no result")
+    except Exception:
+        logger.warning("Code interpreter unavailable; returning a tier-only discount estimate.")
+        discount = (total * Decimal(tier_rates[tier])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return json.dumps({
+            "points_redeemed": 0,
+            "points_discount": 0.0,
+            "tier_discount_pct": int(Decimal(tier_rates[tier]) * 100),
+            "tier_discount": float(discount),
+            "final_total": float(total - discount),
+            "total_savings": float(discount),
+            "points_earned": 0,
+            "remaining_points": loyalty_points,
+            "calculation_mode": "tier_only_fallback",
+            "warning": "Code Interpreter unavailable. Tier-only estimate; points redemption and earnings were not calculated.",
+        })
 
 
 # ── TODO 8 — Agent Entrypoint ─────────────────────────────────────────────────
