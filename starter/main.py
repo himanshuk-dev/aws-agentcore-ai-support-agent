@@ -86,22 +86,22 @@ memory_client = MemoryClient(region_name=REGION)
 _bedrock_runtime = boto3.client("bedrock-agent-runtime", region_name=REGION)
 
 
-# ── TODO 4 — Namespace Helper ─────────────────────────────────────────────────
-# Implement get_namespaces() to return a dict mapping strategy type to
-# namespace template string.
-#
-# Steps:
-#   1. Call mem_client.get_memory_strategies(memory_id) to get strategy list
-#   2. Return a dict: { strategy["type"]: strategy["namespaces"][0] for each strategy }
-#
-# Example output:
-#   { "SEMANTIC": "cs_agent/{actorId}/facts",
-#     "USER_PREFERENCE": "cs_agent/{actorId}/preferences" }
+# ── 4 — Namespace Helper ──────────────────────────────────────────────────────
 
-def get_namespaces(mem_client: MemoryClient, memory_id: str) -> Dict:
+def get_namespaces(mem_client: MemoryClient, memory_id: str) -> Dict[str, str]:
     """Return a dict mapping strategy type → namespace template string."""
-    # TODO: Implement this function
-    pass
+    namespaces = {}
+    for strategy in mem_client.get_memory_strategies(memory_id):
+        templates = strategy.get("namespaceTemplates") or strategy.get("namespaces")
+        if (
+            not isinstance(templates, list)
+            or not templates
+            or not isinstance(templates[0], str)
+            or not templates[0].strip()
+        ):
+            raise ValueError(f"Memory strategy {strategy['type']} has no valid namespace template.")
+        namespaces[strategy["type"]] = templates[0]
+    return namespaces
 
 
 # ── TODO 5 — Memory Hook ──────────────────────────────────────────────────────
