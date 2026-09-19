@@ -40,23 +40,22 @@ from strands_tools.browser import AgentCoreBrowser
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger("CSAI_Agent")
 
-# ── TODO 1 — App Initialisation ───────────────────────────────────────────────
+# ── 1 — App Initialisation ────────────────────────────────────────────────────
 # Create a BedrockAgentCoreApp instance.
 # This registers the ASGI server for AgentCore deployment.
 # There must be exactly one instance per deployment.
 #
 # Hint: app = BedrockAgentCoreApp()
 
-# TODO: Create the BedrockAgentCoreApp instance
-app = None  # Replace this line
+app = BedrockAgentCoreApp()
 
 
 # Suppress interactive tool-consent prompts (required in headless deployments).
 os.environ["BYPASS_TOOL_CONSENT"] = "true"
 
 
-# ── TODO 2 — Configuration ────────────────────────────────────────────────────
-# Replace the placeholder strings with your actual AWS resource values.
+# ── 2 — Configuration ─────────────────────────────────────────────────────────
+# AWS resource values configured for this project.
 # You collected these in Part 1 of the INSTRUCTIONS.
 #
 # GATEWAY_URL format: https://<alias>.gateway.bedrock-agentcore.<region>.amazonaws.com/mcp
@@ -67,10 +66,10 @@ os.environ["BYPASS_TOOL_CONSENT"] = "true"
 GATEWAY_URL = "https://customersupportgateway-km7k2sjq91.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"   # Gateway URL
 KB_ID       = "ILGNOGLJ09"          # Knowledge Base ID
 REGION      = "us-east-1"        # AWS region
-MEMORY_ID   = "<mem_id>"        # TODO: Replace with your Memory ID
+MEMORY_ID   = "CustomerSupportMemory-iQ3gRyE6GT" # Memory ID
 
 
-# ── TODO 3 — Model and Clients ────────────────────────────────────────────────
+# ── 3 — Model and Clients ─────────────────────────────────────────────────────
 # Create:
 #   1. A BedrockModel using model_id "global.amazon.nova-2-lite-v1:0"
 #   2. A MemoryClient with region_name=REGION
@@ -80,14 +79,11 @@ MEMORY_ID   = "<mem_id>"        # TODO: Replace with your Memory ID
 
 model_id = "global.amazon.nova-2-lite-v1:0"
 
-# TODO: Create the BedrockModel instance
-model = None  # Replace this line
+model = BedrockModel(model_id=model_id, region_name=REGION)
 
-# TODO: Create the MemoryClient instance
-memory_client = None  # Replace this line
+memory_client = MemoryClient(region_name=REGION)
 
-# TODO: Create the boto3 bedrock-agent-runtime client
-_bedrock_runtime = None  # Replace this line
+_bedrock_runtime = boto3.client("bedrock-agent-runtime", region_name=REGION)
 
 
 # ── TODO 4 — Namespace Helper ─────────────────────────────────────────────────
