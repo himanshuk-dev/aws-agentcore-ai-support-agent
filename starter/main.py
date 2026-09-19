@@ -27,6 +27,7 @@ from strands.tools.mcp.mcp_client import MCPClient
 from mcp.client.streamable_http import streamable_http_client
 import argparse, json
 import os, asyncio, boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from strands.hooks import (
     HookProvider, AfterInvocationEvent, HookRegistry, MessageAddedEvent,
 )
@@ -199,20 +200,7 @@ class MemoryHook(HookProvider):
         registry.add_callback(AfterInvocationEvent, self.save_support_interaction)
 
 
-# ── TODO 6 — Knowledge Base Tool ─────────────────────────────────────────────
-# Implement search_knowledge_base(query) using the @tool decorator.
-#
-# Steps:
-#   1. Guard: if KB_ID is empty return "Knowledge base not configured."
-#   2. Call _bedrock_runtime.retrieve(
-#          knowledgeBaseId=KB_ID,
-#          retrievalQuery={"text": query}
-#      )
-#   3. Extract resp["retrievalResults"]; return a message if empty
-#   4. Join the text chunks with "\n---\n" and return the result
-#
-# The docstring is the tool description — the model uses it to decide when
-# to call this tool, so keep it clear and accurate.
+# ── 6 — Knowledge Base Tool ───────────────────────────────────────────────────
 
 @tool
 def search_knowledge_base(query: str) -> str:
@@ -227,8 +215,26 @@ def search_knowledge_base(query: str) -> str:
     Returns:
         Relevant information retrieved from the knowledge base
     """
-    # TODO: Implement the Knowledge Base search
-    pass
+    if not KB_ID or not KB_ID.strip() or KB_ID.startswith("<"):
+        return "Knowledge base not configured."
+    if not query.strip():
+        return "Please provide a question to search the knowledge base."
+
+    try:
+        response = _bedrock_runtime.retrieve(
+            knowledgeBaseId=KB_ID,
+            retrievalQuery={"text": query},
+        )
+    except (BotoCoreError, ClientError):
+        logger.warning("Knowledge base retrieval failed.")
+        return "Knowledge base retrieval failed. Please try again; no information was retrieved."
+
+    chunks = []
+    for result in response.get("retrievalResults", []):
+        text = result.get("content", {}).get("text", "")
+        if text.strip():
+            chunks.append(text)
+    return "\n---\n".join(chunks) if chunks else "No relevant knowledge base information found."
 
 
 # ── TODO 7 — Loyalty Discount Tool (Code Interpreter) ────────────────────────
