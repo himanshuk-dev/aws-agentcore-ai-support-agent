@@ -104,31 +104,7 @@ def get_namespaces(mem_client: MemoryClient, memory_id: str) -> Dict[str, str]:
     return namespaces
 
 
-# ── TODO 5 — Memory Hook ──────────────────────────────────────────────────────
-# Implement MemoryHook, a HookProvider subclass that adds long-term memory.
-#
-# The class needs:
-#   __init__(self, actor_id, session_id, memory_client, memory_id)
-#     — store all four as instance attributes
-#     — call get_namespaces() and store the result as self.namespaces
-#
-#   retrieve_customer_context(self, event: MessageAddedEvent)
-#     — only runs for plain-text user messages (not tool results)
-#     — for each strategy namespace, call memory_client.retrieve_memories(
-#          memory_id, namespace (formatted with actorId), query, top_k=5)
-#     — collect non-empty memory texts tagged with their strategy type
-#     — if any memories found, prepend them to the user message as:
-#          "Customer Context:\n<memories>\n\n<original_message>"
-#
-#   save_support_interaction(self, event: AfterInvocationEvent)
-#     — walk the message list backwards to find the last plain-text user
-#       query and the last assistant response
-#     — call memory_client.create_event(memory_id, actor_id, session_id,
-#          messages=[(customer_query, "USER"), (agent_response, "ASSISTANT")])
-#
-#   register_hooks(self, registry: HookRegistry)
-#     — register retrieve_customer_context on MessageAddedEvent
-#     — register save_support_interaction on AfterInvocationEvent
+# ── 5 — Memory Hook ───────────────────────────────────────────────────────────
 
 class MemoryHook(HookProvider):
     """Long-term memory hook for the customer support agent."""
@@ -140,37 +116,87 @@ class MemoryHook(HookProvider):
         memory_client: MemoryClient,
         memory_id: str,
     ):
-        # TODO: Store actor_id, session_id, memory_id, memory_client as attributes
-        # TODO: Call get_namespaces() and store the result as self.namespaces
-        pass
+        self.actor_id = actor_id
+        self.session_id = session_id
+        self.memory_client = memory_client
+        self.memory_id = memory_id
+        self.namespaces = get_namespaces(memory_client, memory_id)
+        self._user_message = None
+        self._original_query = None
 
     def retrieve_customer_context(self, event: MessageAddedEvent):
         """Retrieve relevant memories and prepend them to the user message."""
-        # TODO: Implement memory retrieval
-        # Steps:
-        #   1. Get the last message from event.agent.messages
-        #   2. Check it is a user message and not a tool result
-        #   3. Extract the user query text
-        #   4. For each namespace in self.namespaces, call retrieve_memories()
-        #   5. Collect non-empty memory texts with strategy type tags
-        #   6. If any found, prepend them to the user message
-        pass
+        message = event.message
+        content = message.get("content", [])
+        if message.get("role") != "user" or not content:
+            return
+        if any("text" not in block for block in content):
+            return
+        query = "\n".join(block["text"] for block in content)
+        if not query.strip():
+            return
+
+        # Preserve the user's words so retrieved context is not saved as new facts.
+        self._user_message = message
+        self._original_query = query
+        memories = []
+        for strategy, template in self.namespaces.items():
+            try:
+                records = self.memory_client.retrieve_memories(
+                    memory_id=self.memory_id,
+                    namespace=template.format(actorId=self.actor_id),
+                    query=query,
+                    top_k=5,
+                )
+                for record in records:
+                    text = record.get("content", {}).get("text", "")
+                    if text.strip():
+                        memories.append(f"[{strategy}] {text}")
+            except Exception:
+                logger.warning("Customer memory retrieval failed for %s.", strategy)
+
+        if memories:
+            message["content"] = [{
+                "text": "Customer Context:\n" + "\n".join(memories) + "\n\n" + query
+            }]
 
     def save_support_interaction(self, event: AfterInvocationEvent):
         """Save the completed turn to memory after the agent responds."""
-        # TODO: Implement memory saving
-        # Steps:
-        #   1. Get messages from event.agent.messages
-        #   2. Walk backwards to find the last user query (plain text)
-        #      and the last assistant response
-        #   3. Call memory_client.create_event() with both messages
-        pass
+        if event.result is None or self._user_message is None:
+            return
+        response = None
+        for message in reversed(event.agent.messages):
+            content = message.get("content", [])
+            if message.get("role") == "user" and any("text" in block for block in content):
+                if message is not self._user_message:
+                    return
+                break
+            if message.get("role") == "assistant" and response is None:
+                if any("toolUse" in block for block in content):
+                    continue
+                response = "\n".join(block["text"] for block in content if "text" in block)
+        else:
+            return
 
-    def register_hooks(self, registry: HookRegistry) -> None:  # type: ignore
+        if not response or not response.strip():
+            return
+        try:
+            self.memory_client.create_event(
+                memory_id=self.memory_id,
+                actor_id=self.actor_id,
+                session_id=self.session_id,
+                messages=[(self._original_query, "USER"), (response, "ASSISTANT")],
+            )
+        except Exception:
+            logger.warning("Support interaction could not be saved to memory.")
+        finally:
+            self._user_message = None
+            self._original_query = None
+
+    def register_hooks(self, registry: HookRegistry) -> None:
         """Register both memory callbacks."""
-        # TODO: Register retrieve_customer_context on MessageAddedEvent
-        # TODO: Register save_support_interaction on AfterInvocationEvent
-        pass
+        registry.add_callback(MessageAddedEvent, self.retrieve_customer_context)
+        registry.add_callback(AfterInvocationEvent, self.save_support_interaction)
 
 
 # ── TODO 6 — Knowledge Base Tool ─────────────────────────────────────────────
