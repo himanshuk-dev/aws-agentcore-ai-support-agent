@@ -28,6 +28,7 @@ from strands.hooks import (
 import logging
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from string import Formatter
 import uuid
 from typing import Dict
 from bedrock_agentcore.tools.code_interpreter_client import code_session
@@ -87,9 +88,12 @@ _bedrock_runtime = boto3.client("bedrock-agent-runtime", region_name=REGION)
 # ── 4 — Namespace Helper ──────────────────────────────────────────────────────
 
 def get_namespaces(mem_client: MemoryClient, memory_id: str) -> Dict[str, str]:
-    """Return a dict mapping strategy type → namespace template string."""
+    """Map strategy types to namespaces with only the customer placeholder unresolved."""
     namespaces = {}
     for strategy in mem_client.get_memory_strategies(memory_id):
+        strategy_type = strategy.get("type")
+        if not isinstance(strategy_type, str) or not strategy_type.strip():
+            raise ValueError("Memory strategy has no valid type.")
         templates = strategy.get("namespaceTemplates") or strategy.get("namespaces")
         if (
             not isinstance(templates, list)
@@ -97,8 +101,26 @@ def get_namespaces(mem_client: MemoryClient, memory_id: str) -> Dict[str, str]:
             or not isinstance(templates[0], str)
             or not templates[0].strip()
         ):
-            raise ValueError(f"Memory strategy {strategy['type']} has no valid namespace template.")
-        namespaces[strategy["type"]] = templates[0]
+            raise ValueError(f"Memory strategy {strategy_type} has no valid namespace template.")
+        try:
+            fields = list(Formatter().parse(templates[0]))
+        except ValueError as error:
+            raise ValueError(f"Memory strategy {strategy_type} has a malformed namespace template.") from error
+        for literal, field, format_spec, conversion in fields:
+            if "{" in literal or "}" in literal or (
+                field is not None
+                and (field not in {"memoryStrategyId", "actorId"} or format_spec or conversion)
+            ):
+                raise ValueError(f"Memory strategy {strategy_type} has unsupported namespace formatting.")
+
+        strategy_id = ""
+        if any(field == "memoryStrategyId" for _, field, _, _ in fields):
+            strategy_id = strategy.get("memoryStrategyId") or strategy.get("strategyId")
+            if not isinstance(strategy_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", strategy_id):
+                raise ValueError(f"Memory strategy {strategy_type} has no valid strategy ID.")
+        namespaces[strategy_type] = templates[0].format(
+            memoryStrategyId=strategy_id, actorId="{actorId}",
+        )
     return namespaces
 
 

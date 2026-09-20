@@ -12,6 +12,7 @@ import uuid
 import boto3
 from strands import Agent, tool
 from strands.types import PaginatedList
+from strands.hooks import MessageAddedEvent
 
 
 def load_application():
@@ -29,6 +30,96 @@ def load_application():
         application = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(application)
         return application
+
+
+class NamespaceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = load_application()
+
+    def setUp(self):
+        self.client = Mock()
+        self.template = "/strategies/{memoryStrategyId}/actors/{actorId}/"
+        self.strategies = [
+            {"type": "SEMANTIC", "strategyId": "CustomerSupportSemanticMemory-DwVkyCHsaz",
+             "namespaceTemplates": [self.template]},
+            {"type": "USER_PREFERENCE", "memoryStrategyId": "CustomerSupportUserPreferences-69NsWnB1S3",
+             "namespaceTemplates": [self.template]},
+        ]
+        self.client.get_memory_strategies.return_value = self.strategies
+
+    def test_live_templates_resolve_strategy_ids_and_preserve_actor(self):
+        namespaces = self.app.get_namespaces(self.client, "test-memory")
+        self.assertEqual(namespaces, {
+            "SEMANTIC": "/strategies/CustomerSupportSemanticMemory-DwVkyCHsaz/actors/{actorId}/",
+            "USER_PREFERENCE": "/strategies/CustomerSupportUserPreferences-69NsWnB1S3/actors/{actorId}/",
+        })
+        self.client.get_memory_strategies.assert_called_once_with("test-memory")
+        self.assertEqual(self.strategies[0]["namespaceTemplates"], [self.template])
+
+    def test_hook_resolves_each_customer_and_retains_strategy_tags(self):
+        self.client.retrieve_memories.return_value = [{"content": {"text": "Stored fact"}}]
+        for actor_id in ("CUST-123", "CUST-456"):
+            with self.subTest(actor_id=actor_id):
+                self.client.retrieve_memories.reset_mock()
+                hook = self.app.MemoryHook(actor_id, "s1", self.client, "test-memory")
+                message = {"role": "user", "content": [{"text": "Hello"}]}
+                hook.retrieve_customer_context(MessageAddedEvent(agent=SimpleNamespace(messages=[message]), message=message))
+                self.assertEqual([call.kwargs["namespace"] for call in self.client.retrieve_memories.call_args_list], [
+                    f"/strategies/CustomerSupportSemanticMemory-DwVkyCHsaz/actors/{actor_id}/",
+                    f"/strategies/CustomerSupportUserPreferences-69NsWnB1S3/actors/{actor_id}/",
+                ])
+                self.assertIn("[SEMANTIC] Stored fact", message["content"][0]["text"])
+                self.assertIn("[USER_PREFERENCE] Stored fact", message["content"][0]["text"])
+
+    def test_legacy_namespaces_and_actor_only_templates(self):
+        self.client.get_memory_strategies.return_value = [
+            {"type": "SEMANTIC", "strategyId": "example-id", "namespaces": [self.template]},
+            {"type": "USER_PREFERENCE", "namespaces": ["cs_agent/{actorId}/preferences"]},
+        ]
+        self.assertEqual(self.app.get_namespaces(self.client, "test-memory"), {
+            "SEMANTIC": "/strategies/example-id/actors/{actorId}/",
+            "USER_PREFERENCE": "cs_agent/{actorId}/preferences",
+        })
+
+    def test_current_fields_take_precedence_and_empty_templates_fall_back(self):
+        strategy = {"type": "SEMANTIC", "memoryStrategyId": "current-id", "strategyId": "legacy-id",
+                    "namespaceTemplates": [self.template], "namespaces": ["legacy/{actorId}"]}
+        self.client.get_memory_strategies.return_value = [strategy]
+        self.assertEqual(self.app.get_namespaces(self.client, "test-memory")["SEMANTIC"],
+                         "/strategies/current-id/actors/{actorId}/")
+        strategy["namespaceTemplates"] = []
+        self.assertEqual(self.app.get_namespaces(self.client, "test-memory")["SEMANTIC"], "legacy/{actorId}")
+
+    def test_missing_or_malformed_ids_fail_before_retrieval(self):
+        for strategy_id in (None, "", " ", 42, "../other", "bad/{actorId}"):
+            with self.subTest(strategy_id=strategy_id):
+                self.client.get_memory_strategies.return_value = [
+                    {"type": "SEMANTIC", "strategyId": strategy_id, "namespaceTemplates": [self.template]},
+                ]
+                with self.assertRaisesRegex(ValueError, "valid strategy ID"):
+                    self.app.MemoryHook("CUST-123", "s1", self.client, "test-memory")
+                self.client.retrieve_memories.assert_not_called()
+
+    def test_missing_or_malformed_templates_fail_safely(self):
+        templates = [None, [], "not-a-list", [None], [" "], ["/actors/{actorId"],
+                     ["/{unknown}/"], ["/{actorId.__class__}/"], ["/{actorId!r}/"],
+                     ["/{actorId:>10}/"], ["/{{actorId}}/"]]
+        for value in templates:
+            with self.subTest(value=value):
+                self.client.get_memory_strategies.return_value = [
+                    {"type": "SEMANTIC", "strategyId": "example-id", "namespaceTemplates": value},
+                ]
+                with self.assertRaises(ValueError):
+                    self.app.get_namespaces(self.client, "test-memory")
+
+    def test_missing_type_and_service_failure_are_not_silenced(self):
+        self.client.get_memory_strategies.return_value = [{"namespaces": ["/{actorId}/"]}]
+        with self.assertRaisesRegex(ValueError, "valid type"):
+            self.app.get_namespaces(self.client, "test-memory")
+        self.client.get_memory_strategies.side_effect = RuntimeError("offline failure")
+        with self.assertRaisesRegex(RuntimeError, "offline failure"):
+            self.app.get_namespaces(self.client, "test-memory")
 
 
 class DiscountTests(unittest.TestCase):
