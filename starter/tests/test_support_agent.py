@@ -72,6 +72,32 @@ class NamespaceTests(unittest.TestCase):
                 self.assertIn("[SEMANTIC] Stored fact", message["content"][0]["text"])
                 self.assertIn("[USER_PREFERENCE] Stored fact", message["content"][0]["text"])
 
+    def test_summarization_resolves_current_session_alongside_long_term_memories(self):
+        strategy_id = "customer_support_agent_memory_Summarization-GeQGVC5BXl"
+        template = "/strategies/{memoryStrategyId}/actors/{actorId}/sessions/{sessionId}/"
+        for field in ("namespaceTemplates", "namespaces"):
+            self.client.get_memory_strategies.return_value = self.strategies + [
+                {"type": "SUMMARIZATION", "strategyId": strategy_id, field: [template]},
+            ]
+            self.client.retrieve_memories.return_value = [{"content": {"text": "Stored fact"}}]
+            for actor_id, session_id in (("CUST-123", "deployment-check-002"), ("CUST-456", "s-B")):
+                with self.subTest(field=field, actor_id=actor_id, session_id=session_id):
+                    self.client.retrieve_memories.reset_mock()
+                    hook = self.app.MemoryHook(actor_id, session_id, self.client, "test-memory")
+                    self.assertEqual(hook.namespaces["SUMMARIZATION"],
+                                     f"/strategies/{strategy_id}/actors/{{actorId}}/sessions/{{sessionId}}/")
+                    message = {"role": "user", "content": [{"text": "Hello"}]}
+                    hook.retrieve_customer_context(MessageAddedEvent(
+                        agent=SimpleNamespace(messages=[message]), message=message,
+                    ))
+                    self.assertEqual([c.kwargs["namespace"] for c in self.client.retrieve_memories.call_args_list], [
+                        f"/strategies/CustomerSupportSemanticMemory-DwVkyCHsaz/actors/{actor_id}/",
+                        f"/strategies/CustomerSupportUserPreferences-69NsWnB1S3/actors/{actor_id}/",
+                        f"/strategies/{strategy_id}/actors/{actor_id}/sessions/{session_id}/",
+                    ])
+                    for strategy_type in ("SEMANTIC", "USER_PREFERENCE", "SUMMARIZATION"):
+                        self.assertIn(f"[{strategy_type}] Stored fact", message["content"][0]["text"])
+
     def test_legacy_namespaces_and_actor_only_templates(self):
         self.client.get_memory_strategies.return_value = [
             {"type": "SEMANTIC", "strategyId": "example-id", "namespaces": [self.template]},

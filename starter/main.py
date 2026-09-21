@@ -88,7 +88,7 @@ _bedrock_runtime = boto3.client("bedrock-agent-runtime", region_name=REGION)
 # ── 4 — Namespace Helper ──────────────────────────────────────────────────────
 
 def get_namespaces(mem_client: MemoryClient, memory_id: str) -> Dict[str, str]:
-    """Map strategy types to namespaces with only the customer placeholder unresolved."""
+    """Map strategy types to namespaces with customer and session placeholders unresolved."""
     namespaces = {}
     for strategy in mem_client.get_memory_strategies(memory_id):
         strategy_type = strategy.get("type")
@@ -109,7 +109,7 @@ def get_namespaces(mem_client: MemoryClient, memory_id: str) -> Dict[str, str]:
         for literal, field, format_spec, conversion in fields:
             if "{" in literal or "}" in literal or (
                 field is not None
-                and (field not in {"memoryStrategyId", "actorId"} or format_spec or conversion)
+                and (field not in {"memoryStrategyId", "actorId", "sessionId"} or format_spec or conversion)
             ):
                 raise ValueError(f"Memory strategy {strategy_type} has unsupported namespace formatting.")
 
@@ -119,7 +119,7 @@ def get_namespaces(mem_client: MemoryClient, memory_id: str) -> Dict[str, str]:
             if not isinstance(strategy_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", strategy_id):
                 raise ValueError(f"Memory strategy {strategy_type} has no valid strategy ID.")
         namespaces[strategy_type] = templates[0].format(
-            memoryStrategyId=strategy_id, actorId="{actorId}",
+            memoryStrategyId=strategy_id, actorId="{actorId}", sessionId="{sessionId}",
         )
     return namespaces
 
@@ -164,7 +164,7 @@ class MemoryHook(HookProvider):
             try:
                 records = self.memory_client.retrieve_memories(
                     memory_id=self.memory_id,
-                    namespace=template.format(actorId=self.actor_id),
+                    namespace=template.format(actorId=self.actor_id, sessionId=self.session_id),
                     query=query,
                     top_k=5,
                 )
